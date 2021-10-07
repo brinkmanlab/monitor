@@ -158,7 +158,6 @@ function parseRules(raw_rules) {
  * @return {Promise<{rule: object, timeout: boolean, content: boolean, expiring: boolean, code: number, error: string}>}
  */
 function check(rule, max_age) {
-    // TODO  bulk get state rather than per rule https://docs.aws.amazon.com/AWSJavaScriptSDK/latest/AWS/DynamoDB/DocumentClient.html#batchGet-property
     return new Promise(resolve=>{
         const result = {rule, timeout: false, content: false, expiring: false, code: 0, error: ""};
         (rule.url.startsWith('https') ? https : http).get(rule.url, function (res) {
