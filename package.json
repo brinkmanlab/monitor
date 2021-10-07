@@ -1,0 +1,15 @@
+{
+  "name": "monitor",
+  "version": "1.0.0",
+  "description": "Monitor web services and their SSL certificates",
+  "main": "index.js",
+  "scripts": {
+    "build": "zip -0 monitor.zip index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "aws-sdk": "^2.999.0"
+  }
+}
