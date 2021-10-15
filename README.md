@@ -27,7 +27,7 @@ timeout retries contact_bitfield url operator content
 - url - Full URL to monitor. This must be unique across all rules. You can include
   a [URL fragment](https://en.wikipedia.org/wiki/URI_fragment) if you want to have multiple monitors for the same URL
   where the fragment differs.
-- operator - Either '=' or '~' with an optional '!' prefix to invert the logic. '=' is a simple string match, '~'
+- operator - Either '=' or '\~' with an optional '!' prefix to invert the logic. '=' is a simple string match, '\~'
   expects a regular expression.
 - content - The content to match against using the specified operator. This can contain spaces.
 
