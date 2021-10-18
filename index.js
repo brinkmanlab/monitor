@@ -39,6 +39,11 @@ const state = docClient.scan({TableName, Select: "ALL_ATTRIBUTES"}).promise().th
 function getMessages(result, duration) {
     const messages = []
     const rule = result.rule
+    if (result.code !== 0) messages.push(`FAIL: ${rule.url} returned code ${result.code}`)
+    if (result.timeout) messages.push(`FAIL: ${rule.url} timed out`)
+    if (result.error) messages.push(`FAIL: The request to ${rule.url} failed with: ${result.error}`)
+    if (result.content && (result.code !== 0 || result.timeout || result.error)) return messages;
+
     let downtime = Math.floor(duration / (24 * 60 * 60)) + "d "
     duration %= 24 * 60 * 60
     downtime += Math.floor(duration / (60 * 60)) + "h "
@@ -74,8 +79,6 @@ function getMessages(result, duration) {
         default:
             messages.push(`The rule for ${rule.url} refers to an unsupported operator ${rule.operator}`)
     }
-    if (result.code !== 0) messages.push(`FAIL: ${rule.url} returned code ${result.code}`)
-    if (result.timeout) messages.push(`FAIL: ${rule.url} timed out`)
     return messages
 }
 
@@ -152,69 +155,96 @@ function parseRules(raw_rules) {
 }
 
 /**
- * Check that the url passes the rules criteria
- * @param rule {{url: string, time: number, expiring: boolean}} rule to evaluate
+ * Makes request and handles response
+ * @param url {string} URL of request
+ * @param rule {{url: string, time: number, expiring: boolean, operator: string}} rule that is being checked
  * @param max_age {number} The maximum remaining time before a certificate expires in days
- * @return {Promise<{rule: object, timeout: boolean, content: boolean, expiring: boolean, code: number, error: string}>}
+ * @param result {rule: object, timeout: boolean, content: boolean, expiring: boolean, code: number, error: string, retries: number} result object to resolve
+ * @param resolve {Function} callback to resolve result
+ * @param retries {number}
+ */
+function get(url, rule, max_age, result, resolve, retries) {
+    (url.startsWith('https') ? https : http).get(url, function (res) {
+        // Check return code
+        if (res.statusCode >= 300 && res.statusCode < 400) {
+            // Handle redirect
+            if (url === res.headers.location) {
+                result.error = "redirect loop"
+                resolve(result)
+                return
+            }
+            get(res.headers.location, rule, max_age, result, resolve, retries)
+            return
+        }
+
+        if (res.statusCode < 200 || res.statusCode >= 400) {
+            result.code = res.statusCode
+            resolve(result)
+            return
+        }
+
+        if (rule.url.startsWith('https')) {
+            // Check cert expiry
+            res.socket.on('connect', () => {
+                // This should always occur before the 'end' event (hopefully)
+                const raw_valid_to = res.socket.getPeerCertificate().valid_to
+                const valid_to = Date.parse(raw_valid_to)
+                if (isNaN(valid_to)) console.error(`Couldn't parse certificate expiry for ${rule.url}: ${raw_valid_to}`, res.socket.getPeerCertificate())
+                else result.expiring = valid_to - Date.now() < max_age;
+            })
+        }
+
+        //Check body content
+        let body = ''
+        res.on('data', (chunk)=>{
+            body += chunk
+        })
+        res.on("end", ()=>{
+            let fail_value = false
+            let operator = rule.operator
+            if (operator.startsWith('!')) {
+                fail_value = true
+                operator = operator.slice(1)
+            }
+            switch (operator) {
+                case '=':
+                    result.content = fail_value === body.includes(rule.content)
+                    break
+                case '~':
+                    result.content = fail_value === (body.match(rule.content) === null)
+                    break
+                default:
+                    result.content = true
+            }
+            resolve(result)
+        })
+    }).setTimeout(rule.timeout,function () {
+        if (retries <= 0) {
+            result.timeout = true
+            resolve(result)
+        } else {
+            get(url, rule, max_age, result, resolve, retries-1)
+        }
+    }).on('error', err=>{
+        if (retries <= 0) {
+            result.error = err
+            resolve(result)
+        } else {
+            get(url, rule, max_age, result, resolve, retries-1)
+        }
+    });
+}
+
+/**
+ * Check that the url passes the rules criteria
+ * @param rule {{url: string, time: number, expiring: boolean, retries: number}} rule to evaluate
+ * @param max_age {number} The maximum remaining time before a certificate expires in days
+ * @return {Promise<{rule: object, timeout: boolean, content: boolean, expiring: boolean, code: number, error: string, retries: number}>}
  */
 function check(rule, max_age) {
     return new Promise(resolve=>{
         const result = {rule, timeout: false, content: false, expiring: false, code: 0, error: ""};
-        (rule.url.startsWith('https') ? https : http).get(rule.url, function (res) {
-            // Check return code
-            if (res.statusCode < 200 || res.statusCode >= 300) {
-                result.code = res.statusCode
-                resolve(result)
-                return
-            }
-
-            if (rule.url.startsWith('https')) {
-                // Check cert expiry
-                res.socket.on('connect', () => {
-                    // This should always occur before the 'end' event (hopefully)
-                    const raw_valid_to = res.socket.getPeerCertificate().valid_to
-                    const valid_to = Date.parse(raw_valid_to)
-                    if (isNaN(valid_to)) console.error(`Couldn't parse certificate expiry for ${rule.url}: ${raw_valid_to}`, res.socket.getPeerCertificate())
-                    else result.expiring = valid_to - Date.now() < max_age;
-                })
-            }
-
-            //Check body content
-            let body = ''
-            res.on('data', (chunk)=>{
-                body += chunk
-            })
-            res.on("end", ()=>{
-                let fail_value = false
-                let operator = rule.operator
-                if (operator.startsWith('!')) {
-                    fail_value = true
-                    operator = operator.slice(1)
-                }
-                switch (operator) {
-                    case '=':
-                        result.content = fail_value === body.includes(rule.content)
-                        break
-                    case '~':
-                        result.content = fail_value === (body.match(rule.content) === null)
-                        break
-                    default:
-                        result.content = true
-                }
-                resolve(result)
-            })
-        }).setTimeout(rule.timeout,function () {
-            if (rule.retries <= 0) {
-                result.timeout = true
-                resolve(result)
-            } else {
-                --rule.retries
-                check(rule, max_age).then(e=>resolve(e))
-            }
-        }).on('error', err=>{
-            result.error = err
-            resolve(result)
-        });
+        get(rule.url, rule, max_age, result, resolve, rule.retries || 0)
     })
 }
 
@@ -227,7 +257,7 @@ function main(rule_sources, max_age, contacts) {
             }
             const rules = parseRules(raw_rules)
             Promise.all(rules.map(rule=>check(rule, max_age))).then(async results=>{
-                const messages = new Map()
+                const contact_message = new Map()
                 for (const result of results) {
                     const {time, expiring} = (await state).get(result.rule.url) || {time: 0, expiring: false}
                     const error = result.timeout || result.content || result.code !== 0 || !!result.error
@@ -236,28 +266,27 @@ function main(rule_sources, max_age, contacts) {
                     if (time !== 0 && !error) new_time = 0
                     else if (time === 0 && error) new_time = Date.now()
                     if (((time === 0) === error) || expiring !== result.expiring) setState(result.rule.url, new_time, expiring)
-
+                    const messages = getMessages(result, Math.floor((Date.now() - time) / 1000))
                     // Map results to contacts
                     let bitfield = result.rule.contact_bitfield
                     for (let i = 0; bitfield; ++i) {
                         if (bitfield & 1) {
                             const contact = contacts[i]
                             if (!contact) continue
-                            let message = messages.get(contact)
+                            let message = contact_message.get(contact)
                             if (message === undefined) {
                                 message = []
-                                messages.set(contact, message)
+                                contact_message.set(contact, message)
                             }
-                            if (result.error) message.push(result.error)
-                            message.push(getMessages(result, Math.floor((Date.now() - time) / 1000)))
+                            message.push(messages)
                         }
                         bitfield >>= 1
                     }
                 }
-                return messages
+                return contact_message
             }).then((messages)=>{
                 for ( const [address, errors] of messages.entries()) {
-                    const body = errors.join('\r\n')
+                    const body = errors.flat().join('\r\n')
                     if (address.startsWith("https://") || address.startsWith("http://")) {
                         sendWebhooks(address, body)
                     } else {
