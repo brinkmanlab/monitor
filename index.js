@@ -42,7 +42,7 @@ function getMessages(result, duration) {
     if (result.code !== 0) messages.push(`FAIL: ${rule.url} returned code ${result.code}`)
     if (result.timeout) messages.push(`FAIL: ${rule.url} timed out`)
     if (result.error) messages.push(`FAIL: The request to ${rule.url} failed with: ${result.error}`)
-    if (result.content && (result.code !== 0 || result.timeout || result.error)) return messages;
+    if (!result.content && (result.code !== 0 || result.timeout || result.error)) return messages;
 
     let downtime = Math.floor(duration / (24 * 60 * 60)) + "d "
     duration %= 24 * 60 * 60
