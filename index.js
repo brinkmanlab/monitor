@@ -16,6 +16,7 @@ if (CONTACTS.length >= Math.log2(Number.MAX_SAFE_INTEGER)) console.error("There 
 const FROM = process.env.FROM
 const TEMPLATE = process.env.TEMPLATE
 const TableName = process.env.TABLE_NAME || "MonitorStatus"
+const MAX_REDIRECTS = process.env.MAX_REDIRECTS || 10
 
 // Rule record format (space separated): timeout(seconds) retries contact_bitfield url operator content
 // 4kb max for TXT record ( depending on dns server )
@@ -162,18 +163,24 @@ function parseRules(raw_rules) {
  * @param result {rule: object, timeout: boolean, content: boolean, expiring: boolean, code: number, error: string, retries: number} result object to resolve
  * @param resolve {Function} callback to resolve result
  * @param retries {number}
+ * @param redirects {number}
  */
-function get(url, rule, max_age, result, resolve, retries) {
+function get(url, rule, max_age, result, resolve, retries, redirects) {
     (url.startsWith('https') ? https : http).get(url, function (res) {
         // Check return code
         if (res.statusCode >= 300 && res.statusCode < 400) {
             // Handle redirect
+            if (Number.isInteger(redirects) && redirects > MAX_REDIRECTS) {
+                result.error = "too many redirects"
+                resolve(result)
+                return;
+            }
             if (url === res.headers.location) {
                 result.error = "redirect loop"
                 resolve(result)
                 return
             }
-            get(res.headers.location, rule, max_age, result, resolve, retries)
+            get(res.headers.location, rule, max_age, result, resolve, retries, (redirects || 0) + 1)
             return
         }
 
@@ -223,14 +230,14 @@ function get(url, rule, max_age, result, resolve, retries) {
             result.timeout = true
             resolve(result)
         } else {
-            get(url, rule, max_age, result, resolve, retries-1)
+            get(url, rule, max_age, result, resolve, retries-1, redirects)
         }
     }).on('error', err=>{
         if (retries <= 0) {
             result.error = err
             resolve(result)
         } else {
-            get(url, rule, max_age, result, resolve, retries-1)
+            get(url, rule, max_age, result, resolve, retries-1, redirects)
         }
     });
 }
@@ -244,7 +251,7 @@ function get(url, rule, max_age, result, resolve, retries) {
 function check(rule, max_age) {
     return new Promise(resolve=>{
         const result = {rule, timeout: false, content: false, expiring: false, code: 0, error: ""};
-        get(rule.url, rule, max_age, result, resolve, rule.retries || 0)
+        get(rule.url, rule, max_age, result, resolve, rule.retries || 0, 0)
     })
 }
 

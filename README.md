@@ -13,6 +13,7 @@ the following configuration environment variables:
 - TableName - (Default: MonitorStatus) DynamoDB table name to use for error state persistence
 - REGION - AWS region of script deployment and DynamoDB
 - ENDPOINT - Optional AWS API endpoint
+- MAX_REDIRECTS - (Default: 10) Maximum number of redirects to follow
 
 DNS TXT records containing rules must be of the following format (space separated):
 
