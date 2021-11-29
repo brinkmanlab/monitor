@@ -1,5 +1,5 @@
 locals {
-  contact_bits = {for i,c in var.contacts: c=>pow(2, i) }
+  contact_bits = {for i,c in var.contacts: c=>pow(2, i) if length(c) > 0 }
   contacts = join(";", var.contacts)
   rule_sources = join(";", var.rule_sources)
 

@@ -226,7 +226,7 @@ function get(url, rule, max_age, result, resolve, retries, redirects) {
             }
             resolve(result)
         })
-    }).setTimeout(rule.timeout,function () {
+    }).setTimeout(rule.timeout, function () {
         if (retries <= 0) {
             result.timeout = true
             resolve(result)
