@@ -15,6 +15,7 @@ const CONTACTS = process.env.CONTACTS.split(';').map(c=>c.trim())
 if (CONTACTS.length >= Math.log2(Number.MAX_SAFE_INTEGER)) console.error("There are more contacts than bits available in max number")
 const FROM = process.env.FROM
 const TEMPLATE = process.env.TEMPLATE
+const WEBHOOKTEMPLATE = process.env.WEBHOOK_TEMPLATE || '{"text":"<pre>${body}</pre>"}'
 const TableName = process.env.TABLE_NAME || "MonitorStatus"
 const MAX_REDIRECTS = process.env.MAX_REDIRECTS || 10
 
@@ -134,7 +135,7 @@ function sendWebhooks(urls, body) {
     for (const url in urls) {
         const req = (url.startsWith("https://") ? https : http).request(url, {method: "POST"})
         req.on('error', console.error)
-        req.write(body)
+        req.write(new Function(`return \`${WEBHOOKTEMPLATE}\`;`).call({body}))
         req.end()
     }
 }
