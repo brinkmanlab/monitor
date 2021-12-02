@@ -11,7 +11,7 @@ the following configuration environment variables:
 - FROM - Email address from which notifications are sent
 - TEMPLATE - Name of AWS SES Template to use for notifications
 - TableName - (Default: MonitorStatus) DynamoDB table name to use for error state persistence
-- WEBHOOK_TEMPLATE - (Default: '{"text":"body"}') Webhook payload template. A `body` variable contains the body content and the template string is handled as a JS template literal.
+- WEBHOOK_TEMPLATE - (Default: '{"text":"<pre>${this.body}</pre>"}') Webhook payload template. A `this.body` variable contains the body content and the template string is handled as a JS template literal.
 - REGION - AWS region of script deployment and DynamoDB
 - ENDPOINT - Optional AWS API endpoint
 - MAX_REDIRECTS - (Default: 10) Maximum number of redirects to follow

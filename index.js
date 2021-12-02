@@ -1,6 +1,6 @@
 const https = require('https');
 const http = require('http');
-const dns = require('dns');
+const dns = require('dns').promises;
 
 const AWS = require('aws-sdk');
 AWS.config.update({
@@ -15,7 +15,7 @@ const CONTACTS = process.env.CONTACTS.split(';').map(c=>c.trim())
 if (CONTACTS.length >= Math.log2(Number.MAX_SAFE_INTEGER)) console.error("There are more contacts than bits available in max number")
 const FROM = process.env.FROM
 const TEMPLATE = process.env.TEMPLATE
-const WEBHOOKTEMPLATE = process.env.WEBHOOK_TEMPLATE || '{"text":"<pre>${body}</pre>"}'
+const WEBHOOKTEMPLATE = process.env.WEBHOOK_TEMPLATE || '{"text":"<pre>${this.body}</pre>"}'
 const TableName = process.env.TABLE_NAME || "MonitorStatus"
 const MAX_REDIRECTS = process.env.MAX_REDIRECTS || 10
 
@@ -113,9 +113,9 @@ async function setState(url, time, expiring) {
  * @param addresses {string[]} array of email addresses
  * @param body {string} body to include in email
  */
-function sendMail(addresses, body) {
+async function sendMail(addresses, body) {
     // TODO add smtp config and if provided use https://nodemailer.com/about/
-    SES.sendTemplatedEmail({
+    return SES.sendTemplatedEmail({
         Destination: {
             ToAddresses: addresses,
         },
@@ -123,7 +123,7 @@ function sendMail(addresses, body) {
         Source: FROM,
         Template: TEMPLATE,
         TemplateData: JSON.stringify({ERRORS: body}),
-    }).on('error', resp=>console.error(resp)).send()
+    }).promise()
 }
 
 /**
@@ -131,13 +131,24 @@ function sendMail(addresses, body) {
  * @param urls {string[]} array of urls to POST to
  * @param body {string} body of POST request
  */
-function sendWebhooks(urls, body) {
-    for (const url in urls) {
-        const req = (url.startsWith("https://") ? https : http).request(url, {method: "POST"})
-        req.on('error', console.error)
-        req.write(new Function(`return \`${WEBHOOKTEMPLATE}\`;`).call({body}))
-        req.end()
-    }
+async function sendWebhooks(urls, body) {
+    body = body.replace(/[&<>'"]/g,
+        tag => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            "'": '&#39;',
+            '"': '&quot;'
+        }[tag]));
+    body = new Function(`return \`${WEBHOOKTEMPLATE}\`;`).call({body})
+    return Promise.allSettled(urls.map(url=>new Promise((resolve, reject)=>{
+        const req = (url.startsWith("https://") ? https : http).request(url, {method: "POST", headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': body.length
+            }})
+        req.on('error', reject)
+        req.end(body, resolve)
+    })))
 }
 
 /**
@@ -150,6 +161,7 @@ function parseRules(raw_rules) {
     for (const rule of raw_rules) {
         let [timeout, retries, contact_bitfield, url, operator, ...content] = rule.join('').split(' ')
         timeout = parseInt(timeout) * 1000
+        retries = parseInt(retries)
         contact_bitfield = parseInt(contact_bitfield)  // contact_bitfield.match('^[0-9]+$') ? parseInt(contact_bitfield) : atob(contact_bitfield)  //TODO replace with https://github.com/i5ik/Uint1Array to allow more than ~58 contacts
         rules.push({timeout, retries, contact_bitfield, url, operator, content: content.join(' ')})
     }
@@ -167,7 +179,7 @@ function parseRules(raw_rules) {
  * @param redirects {number}
  */
 function get(url, rule, max_age, result, resolve, retries, redirects) {
-    (url.startsWith('https') ? https : http).get(url, function (res) {
+    (url.startsWith('https') ? https : http).get(url, {timeout: rule.timeout}, function (res) {
         // Check return code
         if (res.statusCode >= 300 && res.statusCode < 400) {
             // Handle redirect
@@ -231,14 +243,24 @@ function get(url, rule, max_age, result, resolve, retries, redirects) {
             result.timeout = true
             resolve(result)
         } else {
-            get(url, rule, max_age, result, resolve, retries-1, redirects)
+            setTimeout(()=>get(url, rule, max_age, result, resolve, retries-1, redirects), 1000)
         }
     }).on('error', err=>{
         if (retries <= 0) {
-            result.error = err
+            switch (err.code) {
+                case 'EPROTO':
+                    result.error = `SSL handshake failed`
+                    break;
+                case 'EAI_AGAIN':
+                    setTimeout(()=>get(url, rule, max_age, result, resolve, retries-1, redirects), 1000)
+                    return
+                default:
+                    result.error = err.message
+                    break;
+            }
             resolve(result)
         } else {
-            get(url, rule, max_age, result, resolve, retries-1, redirects)
+            setTimeout(()=>get(url, rule, max_age, result, resolve, retries-1, redirects), 1000)
         }
     });
 }
@@ -252,19 +274,21 @@ function get(url, rule, max_age, result, resolve, retries, redirects) {
 function check(rule, max_age) {
     return new Promise(resolve=>{
         const result = {rule, timeout: false, content: false, expiring: false, code: 0, error: ""};
-        get(rule.url, rule, max_age, result, resolve, rule.retries || 0, 0)
+        try {
+            get(rule.url, rule, max_age, result, resolve, rule.retries || 0, 0)
+        } catch (e) {
+            result.error = e.message
+            resolve(result)
+        }
     })
 }
 
 function main(rule_sources, max_age, contacts) {
-    for (const source of rule_sources) {
-        dns.resolveTxt(source, function (err, raw_rules) {
-            if (err != null) {
-                console.error(`Error fetching rules from ${source}`)
-                return
-            }
-            const rules = parseRules(raw_rules)
-            Promise.all(rules.map(rule=>check(rule, max_age))).then(async results=>{
+    return Promise.allSettled(rule_sources.map(source =>
+        dns.resolveTxt(source)
+        .then(parseRules)
+        .then(rules => Promise.all(rules.map(rule=>check(rule, max_age))) // Check all rules
+            .then(async results => { // Pair rule state change to notification recipient
                 const contact_message = new Map()
                 for (const result of results) {
                     const {time, expiring} = (await state).get(result.rule.url) || {time: 0, expiring: false}
@@ -273,43 +297,60 @@ function main(rule_sources, max_age, contacts) {
                     let new_time = time
                     if (time !== 0 && !error) new_time = 0
                     else if (time === 0 && error) new_time = Date.now()
-                    if (((time === 0) === error) || expiring !== result.expiring) setState(result.rule.url, new_time, expiring)
+                    if (((time === 0) === error) || expiring !== result.expiring) await setState(result.rule.url, new_time, expiring)
                     const messages = getMessages(result, Math.floor((Date.now() - time) / 1000))
                     // Map results to contacts
                     let bitfield = result.rule.contact_bitfield
                     for (let i = 0; bitfield; ++i) {
                         if (bitfield & 1) {
                             const contact = contacts[i]
-                            if (!contact) continue
-                            let message = contact_message.get(contact)
-                            if (message === undefined) {
-                                message = []
-                                contact_message.set(contact, message)
+                            if (contact) {
+                                let message = contact_message.get(contact)
+                                if (message === undefined) {
+                                    message = []
+                                    contact_message.set(contact, message)
+                                }
+                                message.push(messages)
                             }
-                            message.push(messages)
                         }
                         bitfield >>= 1
                     }
                 }
                 return contact_message
-            }).then((messages)=>{
-                for ( const [address, errors] of messages.entries()) {
-                    const body = errors.flat().join('\r\n')
-                    if (address.startsWith("https://") || address.startsWith("http://")) {
-                        sendWebhooks(address, body)
-                    } else {
-                        sendMail([address], body) // TODO BCC all addresses with the same body to reduce the number of SES requests
-                    }
+            })
+        )
+    )).then(settled => settled.reduce((acc, cur)=> { // Filter any failed rules and merge per rule_source notifications
+        if (cur.status === "fulfilled" && cur.value) {
+            for (const [address, errors] of cur.value.entries()) {
+                const allerr = (acc.get(address) || [])
+                allerr.push(...errors)
+                acc.set(address, allerr)
+            }
+        } else {
+            console.error(`Error fetching rules from ${cur.reason.hostname}`, cur.reason.code || cur.reason)
+        }
+        return acc
+    }, new Map())).then(async (messages)=>{ // Send notifications
+        for ( const [address, errors] of messages.entries()) {
+            try {
+                const body = errors.flat().join('\r\n')
+                if (address.startsWith("https://") || address.startsWith("http://")) {
+                    await sendWebhooks([address], body)
+                } else {
+                    await sendMail([address], body) // TODO BCC all addresses with the same body to reduce the number of SES requests
                 }
-            });
-        });
-    }
+            } catch (e) {
+                console.error(e)
+            }
+        }
+        return messages
+    });
 }
 
-exports.poll = (event, context, callback) => {
-    main(RULE_SOURCES, MAX_AGE, CONTACTS)
+exports.poll = async (event, context) => {
+    await main(RULE_SOURCES, MAX_AGE, CONTACTS)
 }
 
-exports.status = (event, context, callback) => {
+exports.status = async (event, context) => {
     // TODO dump state variable as html, include rules.url as "UP"
 }
