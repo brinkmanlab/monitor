@@ -115,6 +115,10 @@ async function setState(url, time, expiring) {
  */
 async function sendMail(addresses, body) {
     // TODO add smtp config and if provided use https://nodemailer.com/about/
+    // If only one url in body, add domain name as 'feature'
+    let feature = Array.from(body.matchAll('https?://([^:/]+)'))
+    if (feature.length === 1) feature = feature[0][1]
+    else feature = ""
     return SES.sendTemplatedEmail({
         Destination: {
             ToAddresses: addresses,
@@ -122,7 +126,7 @@ async function sendMail(addresses, body) {
         ConfigurationSetName: "rendering_failure_event",
         Source: FROM,
         Template: TEMPLATE,
-        TemplateData: JSON.stringify({ERRORS: body}),
+        TemplateData: JSON.stringify({ERRORS: body, FEATURE: feature}),
     }).promise()
 }
 

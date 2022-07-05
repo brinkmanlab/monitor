@@ -15,7 +15,7 @@ resource "aws_dynamodb_table" "MonitorStatus" {
 
 resource "aws_ses_template" "notification" {
   name    = "MonitorNotification"
-  subject = "Web service monitor event"
+  subject = "Web service monitor event {{FEATURE}}"
   text    = <<EOF
 The following events occurred while polling the configured web services:
 {{ERRORS}}
