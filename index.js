@@ -201,9 +201,13 @@ function get(url, rule, max_age, result, resolve, retries, redirects) {
             return
         }
 
-        if (res.statusCode < 200 || res.statusCode >= 400) {
-            result.code = res.statusCode
-            resolve(result)
+        if ((res.statusCode < 200 || res.statusCode >= 400) && res.statusCode !== 100) {
+            if (retries <= 0) {
+                result.code = res.statusCode
+                resolve(result)
+            } else {
+                setTimeout(()=>get(url, rule, max_age, result, resolve, retries-1, redirects), 1000)
+            }
             return
         }
 
